@@ -7,6 +7,11 @@ Package: `muxtorov98/yii2-kafka`
 
 ## 🚀 Installation
 
+## Kafka + Zookeeper + Kafka UI — Docker Compose Setup
+https://github.com/Muxtorov98/docker-compose-kafka.yml
+
+## yii2 compose install
+
 ```bash
 composer require muxtorov98/yii2-kafka
 ```
@@ -150,8 +155,50 @@ php yii worker/start
 
 ## 📨 Xabar Yuborish (Publish)
 
+```php
+<?php
+declare(strict_types=1);
+
+namespace console\controllers;
+
+use yii\console\Controller;
+use Muxtorov98\YiiKafka\Services\KafkaPublisher;
+
+final class PublishController extends Controller
+{
+    public function __construct(
+        $id,
+        $module,
+        private KafkaPublisher $publisher,
+        $config = []
+    ) {
+        parent::__construct($id, $module, $config);
+    }
+
+    public $defaultAction = 'send';
+
+    public function actionSend(string $topic, string $json): int
+    {
+        return $this->publisher->publishSend($topic, $json);
+    }
+
+    public function actionBatch(string $topic, string $jsonList): int
+    {
+        return $this->publisher->publishBatch($topic, $jsonList);
+    }
+}
+
+```
+📤 Single
 ```bash
+
 php yii kafka-publish/send order-create '{"order_id":999}'
+```
+
+📦 Batch:
+```bash
+php yii kafka-publish/batch order-create '[{"id":1},{"id":2}]'
+
 ```
 
 **Natija:**
