@@ -1,0 +1,22 @@
+{
+  "name": "muxtorov98/yii2-kafka",
+  "description": "Kafka integration for Yii2 with full worker auto discovery & retry support.",
+  "type": "yii2-extension",
+  "license": "MIT",
+  "require": {
+    "php": "^8.2",
+    "yiisoft/yii2": "^2.0",
+    "ext-rdkafka": "*",
+    "psr/log": "^3.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "Muxtorov98\\YiiKafka\\": "src/"
+    }
+  },
+  "extra": {
+    "bootstrap": "Muxtorov98\\YiiKafka\\Bootstrap"
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}
