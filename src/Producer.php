@@ -3,6 +3,14 @@ namespace Muxtorov98\YiiKafka;
 
 use RdKafka\Producer as RdProducer;
 
+/**
+ * Yii2 Kafka Worker
+ *
+ * @package muxtorov98/yii2-kafka
+ * @author  Tulqin Muxtorov <tulqin484@gmail.com>
+ * @license MIT
+ * @link    https://github.com/muxtorov98/yii2-kafka
+ */
 final class Producer
 {
     private RdProducer $producer;

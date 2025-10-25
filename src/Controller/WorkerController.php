@@ -8,6 +8,14 @@ use RecursiveIteratorIterator;
 use RecursiveDirectoryIterator;
 use ReflectionClass;
 
+/**
+ * Yii2 Kafka Worker
+ *
+ * @package muxtorov98/yii2-kafka
+ * @author  Tulqin Muxtorov <tulqin484@gmail.com>
+ * @license MIT
+ * @link    https://github.com/muxtorov98/yii2-kafka
+ */
 final class WorkerController extends Controller
 {
     public $defaultAction = 'start';

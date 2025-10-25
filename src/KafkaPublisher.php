@@ -4,6 +4,14 @@ namespace Muxtorov98\YiiKafka;
 use Yii;
 use yii\helpers\Json;
 
+/**
+ * Yii2 Kafka Worker
+ *
+ * @package muxtorov98/yii2-kafka
+ * @author  Tulqin Muxtorov <tulqin484@gmail.com>
+ * @license MIT
+ * @link    https://github.com/muxtorov98/yii2-kafka
+ */
 final class KafkaPublisher
 {
     private Producer $producer;
