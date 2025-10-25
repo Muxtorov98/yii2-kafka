@@ -17,6 +17,12 @@
   "extra": {
     "bootstrap": "Muxtorov98\\YiiKafka\\Bootstrap"
   },
-  "minimum-stability": "stable",
+  "repositories": [
+    {
+      "type": "path",
+      "url": "../Composer-package/yii2-kafka"
+    }
+  ],
+  "minimum-stability": "dev",
   "prefer-stable": true
 }
