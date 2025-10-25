@@ -30,8 +30,14 @@ final class KafkaOptions
         $conf = new Conf();
         $conf->set('metadata.broker.list', $this->brokers);
         $conf->set('group.id', $this->consumer['group.id'] ?? 'yii2-group');
-        $conf->set('enable.auto.commit', $this->consumer['auto_commit'] ? 'true' : 'false');
-        $conf->set('auto.offset.reset', $this->consumer['auto_offset_reset'] ?? 'latest');
+
+        // ✅ Default values qo‘shildi
+        $autoCommit = $this->consumer['auto_commit'] ?? true;
+        $offsetReset = $this->consumer['auto_offset_reset'] ?? 'earliest';
+
+        $conf->set('enable.auto.commit', $autoCommit ? 'true' : 'false');
+        $conf->set('auto.offset.reset', $offsetReset);
+
         $conf->set('max.poll.interval.ms', (string)($this->consumer['max_poll_interval_ms'] ?? 300000));
         $this->applySecurity($conf);
         return $conf;
