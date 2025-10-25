@@ -2,7 +2,10 @@
 namespace Muxtorov98\YiiKafka\Controller;
 
 use yii\console\Controller;
-use Muxtorov98\YiiKafka\{KafkaOptions, Worker};
+use Muxtorov98\YiiKafka\{
+    KafkaOptions,
+    Worker
+};
 use Muxtorov98\YiiKafka\Attribute\KafkaChannel;
 use RecursiveIteratorIterator;
 use RecursiveDirectoryIterator;
@@ -16,37 +19,41 @@ final class WorkerController extends Controller
     {
         echo "🚀 Kafka Worker starting...\n";
 
-        $options = KafkaOptions::fromArray(
-            require \Yii::getAlias('@common/config/kafka.php')
-        );
+        $config = require \Yii::getAlias('@common/config/kafka.php');
+        $options = KafkaOptions::fromArray($config);
 
-        // ✅ Siz tanlagan to‘g‘ri joy
         $handlersPath = \Yii::getAlias('@common/kafka/handlers');
+
         $handlerMap = $this->discoverHandlers($handlersPath);
 
-        foreach ($handlerMap as $topic => $conf) {
-            echo "👷 Worker listening: topic={$topic}, group={$conf['group']}\n";
+        if (empty($handlerMap)) {
+            echo "⚠️ No Kafka handlers found in {$handlersPath}\n";
+            return;
+        }
+
+        foreach ($handlerMap as $topic => $group) {
+            echo "👷 Worker listening: topic={$topic}, group={$group}\n";
 
             if (pcntl_fork() === 0) {
-                $worker = new Worker($options, $conf['group'], [$topic]);
+                $worker = new Worker($options, $group, [$topic]);
                 $worker->registerHandlers($handlersPath);
                 $worker->start();
-                exit;
+                exit(0);
             }
         }
 
-        while (pcntl_wait($st) > 0);
+        while (pcntl_wait($status) > 0);
     }
 
     private function discoverHandlers(string $dir): array
     {
         $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir));
-        $map = [];
+        $result = [];
 
         foreach ($iterator as $file) {
             if (!$file->isFile() || $file->getExtension() !== 'php') continue;
 
-            $class = $this->classFromFile($file->getPathname());
+            $class = $this->findClassName($file->getPathname());
             if (!$class || !class_exists($class)) continue;
 
             $ref = new ReflectionClass($class);
@@ -54,17 +61,18 @@ final class WorkerController extends Controller
             if (!$attrs) continue;
 
             $meta = $attrs[0]->newInstance();
-            $map[$meta->topic] = ['group' => $meta->group];
+            $result[$meta->topic] = $meta->group;
         }
 
-        return $map;
+        return $result;
     }
 
-    private function classFromFile(string $path): ?string
+    private function findClassName(string $file): ?string
     {
-        $src = file_get_contents($path);
-        preg_match('/namespace\s+([^;]+);/', $src, $ns);
-        preg_match('/class\s+([^\s]+)/', $src, $cl);
-        return ($ns && $cl) ? $ns[1] . '\\' . $cl[1] : null;
+        $content = file_get_contents($file);
+        preg_match('/namespace\s+([^;]+);/', $content, $ns);
+        preg_match('/class\s+([^\s]+)/', $content, $cl);
+
+        return isset($ns[1], $cl[1]) ? $ns[1] . '\\' . $cl[1] : null;
     }
 }
