@@ -15,12 +15,36 @@ final class WorkerController extends Controller
     public function actionStart(): void
     {
         $options = KafkaOptions::fromArray(require \Yii::getAlias('@common/config/kafka.php'));
-        $handlerDir = \Yii::getAlias('@common/handlers');
 
-        $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($handlerDir));
-        $handlers = [];
+        $handlersPath = \Yii::getAlias('@common/kafka/handlers');
+        $handlers = $this->discoverHandlers($handlersPath);
 
-        foreach ($iterator as $file) {
+        echo "🚀 Kafka Worker starting...\n";
+
+        foreach ($handlers as $topic => $config) {
+            echo "👷 Worker listening: topic={$topic}, group={$config['group']}\n";
+
+            if (pcntl_fork() === 0) {
+                $w = new Worker(
+                    $options,
+                    $config['group'],
+                    [$topic]
+                );
+                $w->registerHandlers($handlersPath);
+                $w->start();
+                exit;
+            }
+        }
+
+        while (pcntl_wait($st) > 0);
+    }
+
+    private function discoverHandlers(string $dir): array
+    {
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir));
+        $map = [];
+
+        foreach ($it as $file) {
             if (!$file->isFile() || $file->getExtension() !== 'php') continue;
 
             $class = $this->classFromFile($file->getPathname());
@@ -28,28 +52,15 @@ final class WorkerController extends Controller
 
             $ref = new ReflectionClass($class);
             $attrs = $ref->getAttributes(KafkaChannel::class);
+            if (!$attrs) continue;
 
-            if ($attrs) {
-                $meta = $attrs[0]->newInstance();
-                $handlers[] = [
-                    'topic' => $meta->topic,
-                    'group' => $meta->group,
-                    'class' => $class,
-                ];
-            }
+            $ch = $attrs[0]->newInstance();
+            $map[$ch->topic] = [
+                'group' => $ch->group,
+            ];
         }
 
-        foreach ($handlers as $h) {
-            echo "👷 Worker listening on queue: {$h['topic']} (group: {$h['group']})\n";
-
-            if (pcntl_fork() === 0) {
-                $worker = new Worker($options, $h['group'], [$h['class']]);
-                $worker->run($h['topic']);
-                exit;
-            }
-        }
-
-        while (pcntl_wait($st) > 0);
+        return $map;
     }
 
     private function classFromFile(string $path): ?string
