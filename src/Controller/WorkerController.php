@@ -23,17 +23,20 @@ final class WorkerController extends Controller
         $handlersPath = \Yii::getAlias('@common/kafka/handlers');
         $map = $this->discoverHandlers($handlersPath);
 
-        foreach ($map as $topic => $group) {
-            $pid = pcntl_fork();
+        foreach ($map as $topic => $groups) {
+            foreach ($groups as $group) {
 
-            if ($pid === 0) { // Child process
-                echo "👷 [{$group}] Worker started for topic {$topic} – PID " . getmypid() . "\n";
+                $pid = pcntl_fork();
 
-                $worker = new Worker($options, $group, [$topic]);
-                $worker->registerHandlers($handlersPath);
-                $worker->start();
+                if ($pid === 0) { // child process
+                    echo "👷 Worker started | topic={$topic}, group={$group}, PID=" . getmypid() . "\n";
 
-                exit(0);
+                    $worker = new Worker($options, $group, [$topic]);
+                    $worker->registerHandlers($handlersPath);
+                    $worker->start();
+
+                    exit(0);
+                }
             }
         }
 
@@ -55,20 +58,13 @@ final class WorkerController extends Controller
             $attrs = $ref->getAttributes(KafkaChannel::class);
             if (!$attrs) continue;
 
+            /** @var KafkaChannel $meta */
             $meta = $attrs[0]->newInstance();
 
-            // each topic may have many groups → store multiple
             $map[$meta->topic][] = $meta->group;
         }
 
-        $result = [];
-        foreach ($map as $topic => $groups) {
-            foreach ($groups as $group) {
-                $result[$topic . ':' . $group] = $group;
-            }
-        }
-
-        return array_map(fn($val) => $val, array_flip($result));
+        return $map;
     }
 
     private function classFromFile(string $path): ?string
