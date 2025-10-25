@@ -2,7 +2,7 @@
 namespace Muxtorov98\YiiKafka\Controller;
 
 use yii\console\Controller;
-use Muxtorov98\YiiKafka\{KafkaOptions, Worker, KafkaHandlerInterface};
+use Muxtorov98\YiiKafka\{KafkaOptions, Worker};
 use Muxtorov98\YiiKafka\Attribute\KafkaChannel;
 use RecursiveIteratorIterator;
 use RecursiveDirectoryIterator;
@@ -14,24 +14,23 @@ final class WorkerController extends Controller
 
     public function actionStart(): void
     {
-        $options = KafkaOptions::fromArray(require \Yii::getAlias('@common/config/kafka.php'));
-
-        $handlersPath = \Yii::getAlias('@common/kafka/handlers');
-        $handlers = $this->discoverHandlers($handlersPath);
-
         echo "🚀 Kafka Worker starting...\n";
 
-        foreach ($handlers as $topic => $config) {
-            echo "👷 Worker listening: topic={$topic}, group={$config['group']}\n";
+        $options = KafkaOptions::fromArray(
+            require \Yii::getAlias('@common/config/kafka.php')
+        );
+
+        // ✅ Siz tanlagan to‘g‘ri joy
+        $handlersPath = \Yii::getAlias('@common/kafka/handlers');
+        $handlerMap = $this->discoverHandlers($handlersPath);
+
+        foreach ($handlerMap as $topic => $conf) {
+            echo "👷 Worker listening: topic={$topic}, group={$conf['group']}\n";
 
             if (pcntl_fork() === 0) {
-                $w = new Worker(
-                    $options,
-                    $config['group'],
-                    [$topic]
-                );
-                $w->registerHandlers($handlersPath);
-                $w->start();
+                $worker = new Worker($options, $conf['group'], [$topic]);
+                $worker->registerHandlers($handlersPath);
+                $worker->start();
                 exit;
             }
         }
@@ -41,10 +40,10 @@ final class WorkerController extends Controller
 
     private function discoverHandlers(string $dir): array
     {
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir));
+        $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir));
         $map = [];
 
-        foreach ($it as $file) {
+        foreach ($iterator as $file) {
             if (!$file->isFile() || $file->getExtension() !== 'php') continue;
 
             $class = $this->classFromFile($file->getPathname());
@@ -54,10 +53,8 @@ final class WorkerController extends Controller
             $attrs = $ref->getAttributes(KafkaChannel::class);
             if (!$attrs) continue;
 
-            $ch = $attrs[0]->newInstance();
-            $map[$ch->topic] = [
-                'group' => $ch->group,
-            ];
+            $meta = $attrs[0]->newInstance();
+            $map[$meta->topic] = ['group' => $meta->group];
         }
 
         return $map;
