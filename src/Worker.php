@@ -10,55 +10,65 @@ final class Worker
     private KafkaConsumer $consumer;
     private array $handlerObjects = [];
     private bool $running = true;
+    private array $topics;
 
     public function __construct(
         private KafkaOptions $options,
         private string $group,
-        private array $handlers
+        array $topics
     ) {
-        foreach ($handlers as $class) {
-            $obj = new $class();
+        $this->topics = $topics;
+    }
+
+    public function registerHandlers(string $handlersPath): void
+    {
+        foreach (glob($handlersPath . '/*.php') as $file) {
+            require_once $file;
+            $fqcn = $this->guessFQCN($file);
+            if (!$fqcn || !class_exists($fqcn)) continue;
+
+            $ref = new \ReflectionClass($fqcn);
+            $attrs = $ref->getAttributes(Attribute\KafkaChannel::class);
+            if (!$attrs) continue;
+
+            $meta = $attrs[0]->newInstance();
+
+            if (!in_array($meta->topic, $this->topics, true)) continue;
+
+            $obj = new $fqcn();
             if ($obj instanceof KafkaHandlerInterface) {
                 $this->handlerObjects[] = $obj;
             }
         }
     }
 
-    public function run(string $topic): void
+    public function start(): void
     {
-        echo "👂 Kafka → topic={$topic}, group={$this->group}\n";
+        echo "👂 Kafka listening: topic(s)=".implode(',', $this->topics).", group={$this->group}\n";
 
         $this->consumer = new KafkaConsumer($this->options->consumerConf());
-        $this->consumer->subscribe([$topic]);
+        $this->consumer->subscribe($this->topics);
 
         pcntl_async_signals(true);
-        pcntl_signal(SIGINT, fn() => $this->shutdown());
-        pcntl_signal(SIGTERM, fn() => $this->shutdown());
+        pcntl_signal(SIGINT, fn() => $this->stop());
+        pcntl_signal(SIGTERM, fn() => $this->stop());
 
         while ($this->running) {
             $msg = $this->consumer->consume(1000);
-            if (!$msg) {
-                continue;
-            }
+            if (!$msg) continue;
 
             switch ($msg->err) {
                 case RD_KAFKA_RESP_ERR_NO_ERROR:
                     $this->processMessage($msg);
                     break;
-
-                case RD_KAFKA_RESP_ERR__PARTITION_EOF:
-                    break; // normal condition
-
                 case RD_KAFKA_RESP_ERR__TIMED_OUT:
-                    echo "⏳ Poll timeout...\n";
                     break;
-
                 default:
                     echo "❌ Kafka error: {$msg->errstr()}\n";
-                    $this->shutdown();
                     break;
             }
         }
+        echo "🛑 Worker stopped\n";
     }
 
     private function processMessage(Message $msg): void
@@ -66,23 +76,22 @@ final class Worker
         $payload = json_decode($msg->payload, true);
 
         foreach ($this->handlerObjects as $handler) {
-            $attempt = 0;
-            while ($attempt++ < ($this->options->retry['max_attempts'] ?? 3)) {
-                try {
-                    $handler->handle($payload);
-                    $this->consumer->commit($msg);
-                    return;
-                } catch (Throwable $e) {
-                    echo "⚠️ Retry {$attempt}: {$e->getMessage()}\n";
-                    usleep(($this->options->retry['backoff_ms'] ?? 500) * 1000);
-                }
-            }
+            $handler->handle($payload);
         }
+
+        $this->consumer->commit($msg);
     }
 
-    private function shutdown(): void
+    private function guessFQCN(string $file): ?string
     {
-        echo "\n👋 Worker stopping gracefully...\n";
+        $code = file_get_contents($file);
+        preg_match('/namespace\s+([^;]+);/', $code, $ns);
+        preg_match('/class\s+([^\s]+)/', $code, $cl);
+        return ($ns[1] ?? null) . '\\' . ($cl[1] ?? null);
+    }
+
+    private function stop(): void
+    {
         $this->running = false;
         $this->consumer->close();
     }
