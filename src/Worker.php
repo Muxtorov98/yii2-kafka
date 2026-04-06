@@ -1,6 +1,12 @@
 <?php
 namespace Muxtorov98\YiiKafka;
 
+use Muxtorov98\YiiKafka\Contracts\IdempotencyStoreInterface;
+use Muxtorov98\YiiKafka\Contracts\MetricsCollectorInterface;
+use Muxtorov98\YiiKafka\Metrics\InMemoryMetricsCollector;
+use Muxtorov98\YiiKafka\Store\NullIdempotencyStore;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use RdKafka\KafkaConsumer;
 use RdKafka\Message;
 use ReflectionClass;
@@ -23,13 +29,25 @@ final class Worker
     private array $handlerObjects = [];
     private bool $running = true;
     private array $topics;
+    private LoggerInterface $logger;
+    private MetricsCollectorInterface $metrics;
+    private IdempotencyStoreInterface $idempotencyStore;
+    private Producer $producer;
 
     public function __construct(
         private KafkaOptions $options,
         private string $group,
-        array $topics
+        array $topics,
+        ?LoggerInterface $logger = null,
+        ?MetricsCollectorInterface $metrics = null,
+        ?IdempotencyStoreInterface $idempotencyStore = null,
+        ?Producer $producer = null
     ) {
         $this->topics = $topics;
+        $this->logger = $logger ?? new NullLogger();
+        $this->metrics = $metrics ?? new InMemoryMetricsCollector();
+        $this->idempotencyStore = $idempotencyStore ?? new NullIdempotencyStore();
+        $this->producer = $producer ?? new Producer($this->options);
     }
 
     public function registerHandlers(string $handlersPath): void
@@ -62,7 +80,9 @@ final class Worker
 
     public function start(): void
     {
-        echo "👂 Kafka listening: topic(s)=".implode(',', $this->topics).", group={$this->group}\n";
+        $message = "Kafka listening: topic(s)=".implode(',', $this->topics).", group={$this->group}";
+        $this->logger->info($message, ['topics' => $this->topics, 'group' => $this->group]);
+        echo "👂 {$message}\n";
 
         if ($this->handlerObjects === []) {
             throw new RuntimeException(sprintf(
@@ -90,10 +110,17 @@ final class Worker
                 case RD_KAFKA_RESP_ERR__TIMED_OUT:
                     break;
                 default:
+                    $this->metrics->increment('consumer_error_count', 1, ['group' => $this->group]);
+                    $this->logger->error('Kafka consumer error.', [
+                        'group' => $this->group,
+                        'topics' => $this->topics,
+                        'error' => $msg->errstr(),
+                    ]);
                     echo "❌ Kafka error: {$msg->errstr()}\n";
                     break;
             }
         }
+        $this->logMetricsSnapshot();
         echo "🛑 Worker stopped\n";
     }
 
@@ -110,13 +137,22 @@ final class Worker
             }
 
             $this->consumer->commit($msg);
+            $this->metrics->increment('processed_count', 1, ['group' => $this->group, 'topic' => $msg->topic_name]);
         } catch (Throwable $e) {
+            $this->metrics->increment('failed_count', 1, ['group' => $this->group, 'topic' => $msg->topic_name]);
+            $this->logger->error('Kafka handler failed.', [
+                'topic' => $msg->topic_name,
+                'group' => $this->group,
+                'error' => $e->getMessage(),
+            ]);
             echo sprintf(
                 "❌ Handler failed | topic=%s, group=%s, error=%s\n",
                 $msg->topic_name,
                 $this->group,
                 $e->getMessage()
             );
+
+            $this->publishToDlq($msg, $e);
 
             if ($this->options->commitOnFailure()) {
                 $this->consumer->commit($msg);
@@ -144,16 +180,51 @@ final class Worker
     {
         $maxAttempts = $this->options->retryMaxAttempts();
         $backoffMs = $this->options->retryBackoffMs();
+        $handlerName = $handler::class;
+
+        if ($handler instanceof IdempotentKafkaHandlerInterface) {
+            $idempotencyKey = $this->buildIdempotencyKey($handler, $payload);
+            if ($this->idempotencyStore->has($idempotencyKey)) {
+                $this->metrics->increment('skipped_duplicate_count', 1, [
+                    'group' => $this->group,
+                    'topic' => $msg->topic_name,
+                    'handler' => $handlerName,
+                ]);
+                $this->logger->info('Kafka duplicate skipped.', [
+                    'topic' => $msg->topic_name,
+                    'group' => $this->group,
+                    'handler' => $handlerName,
+                    'idempotency_key' => $idempotencyKey,
+                ]);
+                return;
+            }
+        }
 
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
             try {
                 $handler->handle($payload);
+                if ($handler instanceof IdempotentKafkaHandlerInterface) {
+                    $this->idempotencyStore->markProcessed($this->buildIdempotencyKey($handler, $payload));
+                }
                 return;
             } catch (Throwable $e) {
                 if ($attempt >= $maxAttempts) {
                     throw $e;
                 }
 
+                $this->metrics->increment('retry_count', 1, [
+                    'group' => $this->group,
+                    'topic' => $msg->topic_name,
+                    'handler' => $handlerName,
+                ]);
+                $this->logger->warning('Kafka handler retry scheduled.', [
+                    'topic' => $msg->topic_name,
+                    'group' => $this->group,
+                    'handler' => $handlerName,
+                    'attempt' => $attempt,
+                    'max_attempts' => $maxAttempts,
+                    'error' => $e->getMessage(),
+                ]);
                 echo sprintf(
                     "⚠️ Handler retry | topic=%s, group=%s, attempt=%d/%d, error=%s\n",
                     $msg->topic_name,
@@ -167,6 +238,51 @@ final class Worker
                     usleep($backoffMs * 1000);
                 }
             }
+        }
+    }
+
+    private function publishToDlq(Message $msg, Throwable $e): void
+    {
+        if (!$this->options->dlqEnabled()) {
+            return;
+        }
+
+        $payload = [
+            'original_topic' => $msg->topic_name,
+            'group' => $this->group,
+            'payload' => $msg->payload,
+        ];
+
+        if ($this->options->dlqIncludeErrorContext()) {
+            $payload['error'] = [
+                'message' => $e->getMessage(),
+                'type' => $e::class,
+            ];
+        }
+
+        $dlqTopic = $msg->topic_name . $this->options->dlqTopicSuffix();
+
+        try {
+            $this->producer->send($dlqTopic, $payload);
+            $this->metrics->increment('dlq_published_count', 1, ['group' => $this->group, 'topic' => $msg->topic_name]);
+            $this->logger->error('Kafka message sent to DLQ.', [
+                'topic' => $msg->topic_name,
+                'group' => $this->group,
+                'dlq_topic' => $dlqTopic,
+            ]);
+        } catch (Throwable $dlqError) {
+            $this->logger->critical('Kafka DLQ publish failed.', [
+                'topic' => $msg->topic_name,
+                'group' => $this->group,
+                'dlq_topic' => $dlqTopic,
+                'error' => $dlqError->getMessage(),
+            ]);
+            echo sprintf(
+                "❌ DLQ publish failed | topic=%s, group=%s, error=%s\n",
+                $msg->topic_name,
+                $this->group,
+                $dlqError->getMessage()
+            );
         }
     }
 
@@ -199,5 +315,28 @@ final class Worker
         if (isset($this->consumer)) {
             $this->consumer->close();
         }
+        $this->logMetricsSnapshot();
+    }
+
+    private function buildIdempotencyKey(IdempotentKafkaHandlerInterface $handler, array $payload): string
+    {
+        return implode(':', [
+            $this->group,
+            $handler::class,
+            $handler->uniqueKey($payload),
+        ]);
+    }
+
+    private function logMetricsSnapshot(): void
+    {
+        $snapshot = $this->metrics->snapshot();
+        if ($snapshot === []) {
+            return;
+        }
+
+        $this->logger->info('Kafka worker metrics snapshot.', [
+            'group' => $this->group,
+            'metrics' => $snapshot,
+        ]);
     }
 }

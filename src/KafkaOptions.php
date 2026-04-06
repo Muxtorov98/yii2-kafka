@@ -18,6 +18,7 @@ final class KafkaOptions
     public array $producer = [];
     public array $consumer = [];
     public array $retry = [];
+    public array $dlq = [];
 
     public static function fromArray(array $config): self
     {
@@ -29,6 +30,11 @@ final class KafkaOptions
         $self->retry = $config['retry'] ?? [
             'max_attempts' => 3,
             'backoff_ms' => 500,
+        ];
+        $self->dlq = $config['dlq'] ?? [
+            'enabled' => false,
+            'topic_suffix' => '.dlq',
+            'include_error_context' => true,
         ];
         return $self;
     }
@@ -106,5 +112,20 @@ final class KafkaOptions
     public function producerFlushRetries(): int
     {
         return max(1, (int) ($this->producer['flush_retries'] ?? 3));
+    }
+
+    public function dlqEnabled(): bool
+    {
+        return (bool) ($this->dlq['enabled'] ?? false);
+    }
+
+    public function dlqTopicSuffix(): string
+    {
+        return (string) ($this->dlq['topic_suffix'] ?? '.dlq');
+    }
+
+    public function dlqIncludeErrorContext(): bool
+    {
+        return (bool) ($this->dlq['include_error_context'] ?? true);
     }
 }
