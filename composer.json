@@ -7,6 +7,7 @@
     "php": "^8.2",
     "yiisoft/yii2": "^2.0",
     "ext-rdkafka": "*",
+    "ext-pcntl": "*",
     "psr/log": "^3.0"
   },
   "autoload": {
@@ -15,14 +16,12 @@
     }
   },
   "extra": {
-    "bootstrap": "Muxtorov98\\YiiKafka\\Bootstrap"
-  },
-  "repositories": [
-    {
-      "type": "path",
-      "url": "../Composer-package/yii2-kafka"
+    "yii\\extension": {
+      "bootstrap": [
+        "Muxtorov98\\YiiKafka\\Bootstrap"
+      ]
     }
-  ],
-  "minimum-stability": "dev",
+  },
+  "minimum-stability": "stable",
   "prefer-stable": true
 }

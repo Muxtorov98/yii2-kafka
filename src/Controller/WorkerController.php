@@ -32,9 +32,13 @@ final class WorkerController extends Controller
         $map = $this->discoverHandlers($handlersPath);
 
         foreach ($map as $topic => $groups) {
-            foreach ($groups as $group) {
+            foreach (array_unique($groups) as $group) {
 
                 $pid = pcntl_fork();
+
+                if ($pid === -1) {
+                    throw new \RuntimeException("Could not fork worker for topic={$topic}, group={$group}");
+                }
 
                 if ($pid === 0) { // child process
                     echo "👷 Worker started | topic={$topic}, group={$group}, PID=" . getmypid() . "\n";

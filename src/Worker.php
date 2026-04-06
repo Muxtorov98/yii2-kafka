@@ -3,7 +3,11 @@ namespace Muxtorov98\YiiKafka;
 
 use RdKafka\KafkaConsumer;
 use RdKafka\Message;
+use ReflectionClass;
+use RuntimeException;
 use Throwable;
+use Yii;
+use yii\helpers\Json;
 
 /**
  * Yii2 Kafka Worker
@@ -30,20 +34,26 @@ final class Worker
 
     public function registerHandlers(string $handlersPath): void
     {
-        foreach (glob($handlersPath . '/*.php') as $file) {
+        foreach ($this->findPhpFiles($handlersPath) as $file) {
             require_once $file;
             $fqcn = $this->guessFQCN($file);
-            if (!$fqcn || !class_exists($fqcn)) continue;
+            if (!$fqcn || !class_exists($fqcn)) {
+                continue;
+            }
 
-            $ref = new \ReflectionClass($fqcn);
+            $ref = new ReflectionClass($fqcn);
             $attrs = $ref->getAttributes(Attribute\KafkaChannel::class);
-            if (!$attrs) continue;
+            if (!$attrs) {
+                continue;
+            }
 
             $meta = $attrs[0]->newInstance();
 
-            if (!in_array($meta->topic, $this->topics, true)) continue;
+            if (!in_array($meta->topic, $this->topics, true) || $meta->group !== $this->group) {
+                continue;
+            }
 
-            $obj = new $fqcn();
+            $obj = class_exists(Yii::class) ? Yii::createObject($fqcn) : new $fqcn();
             if ($obj instanceof KafkaHandlerInterface) {
                 $this->handlerObjects[] = $obj;
             }
@@ -54,7 +64,15 @@ final class Worker
     {
         echo "👂 Kafka listening: topic(s)=".implode(',', $this->topics).", group={$this->group}\n";
 
-        $this->consumer = new KafkaConsumer($this->options->consumerConf());
+        if ($this->handlerObjects === []) {
+            throw new RuntimeException(sprintf(
+                'No Kafka handlers registered for topic(s) [%s] and group [%s].',
+                implode(',', $this->topics),
+                $this->group
+            ));
+        }
+
+        $this->consumer = new KafkaConsumer($this->options->consumerConf($this->group));
         $this->consumer->subscribe($this->topics);
 
         pcntl_async_signals(true);
@@ -62,7 +80,7 @@ final class Worker
         pcntl_signal(SIGTERM, fn() => $this->stop());
 
         while ($this->running) {
-            $msg = $this->consumer->consume(1000);
+            $msg = $this->consumer->consume($this->options->consumeTimeoutMs());
             if (!$msg) continue;
 
             switch ($msg->err) {
@@ -81,26 +99,105 @@ final class Worker
 
     private function processMessage(Message $msg): void
     {
-        $payload = json_decode($msg->payload, true);
+        try {
+            $payload = Json::decode($msg->payload, true);
+            if (!is_array($payload)) {
+                throw new RuntimeException('Kafka payload must decode to array.');
+            }
 
-        foreach ($this->handlerObjects as $handler) {
-            $handler->handle($payload);
+            foreach ($this->handlerObjects as $handler) {
+                $this->runHandlerWithRetry($handler, $payload, $msg);
+            }
+
+            $this->consumer->commit($msg);
+        } catch (Throwable $e) {
+            echo sprintf(
+                "❌ Handler failed | topic=%s, group=%s, error=%s\n",
+                $msg->topic_name,
+                $this->group,
+                $e->getMessage()
+            );
+
+            if ($this->options->commitOnFailure()) {
+                $this->consumer->commit($msg);
+            }
         }
-
-        $this->consumer->commit($msg);
     }
 
     private function guessFQCN(string $file): ?string
     {
         $code = file_get_contents($file);
+        if ($code === false) {
+            return null;
+        }
+
         preg_match('/namespace\s+([^;]+);/', $code, $ns);
         preg_match('/class\s+([^\s]+)/', $code, $cl);
-        return ($ns[1] ?? null) . '\\' . ($cl[1] ?? null);
+        if (!isset($ns[1], $cl[1])) {
+            return null;
+        }
+
+        return $ns[1] . '\\' . $cl[1];
+    }
+
+    private function runHandlerWithRetry(KafkaHandlerInterface $handler, array $payload, Message $msg): void
+    {
+        $maxAttempts = $this->options->retryMaxAttempts();
+        $backoffMs = $this->options->retryBackoffMs();
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                $handler->handle($payload);
+                return;
+            } catch (Throwable $e) {
+                if ($attempt >= $maxAttempts) {
+                    throw $e;
+                }
+
+                echo sprintf(
+                    "⚠️ Handler retry | topic=%s, group=%s, attempt=%d/%d, error=%s\n",
+                    $msg->topic_name,
+                    $this->group,
+                    $attempt,
+                    $maxAttempts,
+                    $e->getMessage()
+                );
+
+                if ($backoffMs > 0) {
+                    usleep($backoffMs * 1000);
+                }
+            }
+        }
+    }
+
+    /**
+     * @return string[]
+     */
+    private function findPhpFiles(string $handlersPath): array
+    {
+        if (!is_dir($handlersPath)) {
+            return [];
+        }
+
+        $files = [];
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($handlersPath, \FilesystemIterator::SKIP_DOTS)
+        );
+
+        foreach ($iterator as $file) {
+            if ($file->isFile() && $file->getExtension() === 'php') {
+                $files[] = $file->getPathname();
+            }
+        }
+
+        return $files;
     }
 
     private function stop(): void
     {
         $this->running = false;
-        $this->consumer->close();
+        if (isset($this->consumer)) {
+            $this->consumer->close();
+        }
     }
 }

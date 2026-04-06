@@ -33,13 +33,12 @@ final class KafkaOptions
         return $self;
     }
 
-    public function consumerConf(): Conf
+    public function consumerConf(?string $groupId = null): Conf
     {
         $conf = new Conf();
         $conf->set('metadata.broker.list', $this->brokers);
-        $conf->set('group.id', $this->consumer['group.id'] ?? 'yii2-group');
+        $conf->set('group.id', $groupId ?? $this->consumer['group.id'] ?? 'yii2-group');
 
-        // ✅ Default values qo‘shildi
         $autoCommit = $this->consumer['auto_commit'] ?? true;
         $offsetReset = $this->consumer['auto_offset_reset'] ?? 'earliest';
 
@@ -77,5 +76,35 @@ final class KafkaOptions
         if (!empty($this->security['ssl']['ca'])) {
             $conf->set('ssl.ca.location', $this->security['ssl']['ca']);
         }
+    }
+
+    public function retryMaxAttempts(): int
+    {
+        return max(1, (int) ($this->retry['max_attempts'] ?? 3));
+    }
+
+    public function retryBackoffMs(): int
+    {
+        return max(0, (int) ($this->retry['backoff_ms'] ?? 500));
+    }
+
+    public function commitOnFailure(): bool
+    {
+        return (bool) ($this->consumer['commit_on_failure'] ?? false);
+    }
+
+    public function consumeTimeoutMs(): int
+    {
+        return max(100, (int) ($this->consumer['consume_timeout_ms'] ?? 1000));
+    }
+
+    public function producerFlushTimeoutMs(): int
+    {
+        return max(100, (int) ($this->producer['flush_timeout_ms'] ?? 1000));
+    }
+
+    public function producerFlushRetries(): int
+    {
+        return max(1, (int) ($this->producer['flush_retries'] ?? 3));
     }
 }

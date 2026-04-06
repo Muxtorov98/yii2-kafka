@@ -1,225 +1,136 @@
-# 🐘 Yii2 Kafka Worker — Quick Documentation
+# yii2-kafka
 
-**Kafka integration for Yii2** — Auto Worker Discovery, Multi Group, Retry, Graceful Shutdown ✅  
+Kafka integration for Yii2 with:
+
+- handler auto-discovery
+- topic + group based worker forking
+- retry on handler failure
+- graceful shutdown
+- safer producer flush handling
+
 Package: `muxtorov98/yii2-kafka`
 
----
+## Requirements
 
-## 🚀 Installation
+- PHP `^8.2`
+- Yii2 `^2.0`
+- `ext-rdkafka`
+- `ext-pcntl`
 
-## Kafka + Zookeeper + Kafka UI — Docker Compose Setup
-https://github.com/Muxtorov98/docker-compose-kafka.yml
-
-## 🧩 PHP uchun Kafka Extension (rdkafka) o‘rnatish
-
-Kafka bilan ishlash uchun php-rdkafka extension talab etiladi.Bu extension librdkafka kutubxonasiga asoslanadi va Kafka producer / consumer funksiyalarini PHP orqali amalga oshirishga imkon beradi.
-
-## 🐳 Docker muhiti uchun
-
-```dockerfile
-# --- Kafka extension (rdkafka) ---
-RUN pecl install rdkafka \
-    && docker-php-ext-enable rdkafka \
-    && rm -rf /tmp/pear
-
-# --- PCNTL extension (background process control) ---
-RUN docker-php-ext-install pcntl
-```
-
-## Izoh:
-
-- rdkafka — Kafka bilan ishlash uchun asosiy extension
-
-- pcntl — workerlarni parallel ishlashini (multi-process) ta’minlaydi
-
-## 🖥️ Ubuntu’da o‘rnatish
-
-```bash
-sudo apt update
-sudo apt install -y php-dev librdkafka-dev librssl-dev build-essential
-
-sudo pecl install rdkafka
-echo "extension=rdkafka.so" | sudo tee /etc/php/$(php -r "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;")/mods-available/rdkafka.ini
-sudo phpenmod rdkafka
-
-# PCNTL moduli
-sudo docker-php-ext-install pcntl  # agar dockerda bo‘lmasa
-```
-
-## Keyin PHP versiyasini tekshiring:
-
-```bash
-php -m | grep rdkafka
-```
-- Agar rdkafka va pcntl ko‘rinsa — hammasi tayyor ✅
-
-
-## yii2 compose install
+## Install
 
 ```bash
 composer require muxtorov98/yii2-kafka
 ```
 
----
+## Docker extensions
 
----
+```dockerfile
+RUN pecl install rdkafka \
+    && docker-php-ext-enable rdkafka \
+    && docker-php-ext-install pcntl
+```
 
-## ⚙️ Kafka Configuration (`common/config/kafka.php`)
+## Config
+
+Create `common/config/kafka.php`
 
 ```php
 <?php
 
 return [
-    // Kafka broker
     'brokers' => 'kafka:9092',
-
-    // ✅ Consumer settings
     'consumer' => [
-        'auto_commit' => true,              // offsetlarni avtomatik commit
-        'auto_offset_reset' => 'earliest',  // yangi group bo‘lsa boshidan o‘qiydi
-        'max_poll_interval_ms' => 300000,   // 5 daqiqa
-        // 'group.id' => 'override-ham-bo‘ladi' // Worker o‘zi ham group oladi
+        'auto_commit' => true,
+        'auto_offset_reset' => 'earliest',
+        'max_poll_interval_ms' => 300000,
+        'consume_timeout_ms' => 1000,
+        'commit_on_failure' => false,
     ],
-
-    // ✅ Producer settings
     'producer' => [
         'acks' => 'all',
         'compression' => 'lz4',
         'linger_ms' => 1,
+        'flush_timeout_ms' => 1000,
+        'flush_retries' => 3,
     ],
-
-    // ✅ Retry logika (WorkerException bo‘lsa)
     'retry' => [
         'max_attempts' => 3,
-        'backoff_ms' => 500, // retry delay
+        'backoff_ms' => 500,
     ],
-
-    // ✅ Agar SASL/SSL bo‘lsa (optional)
     'security' => [
         // 'protocol' => 'SASL_SSL',
         // 'sasl' => [
         //     'mechanism' => 'PLAIN',
-        //     'username'  => 'admin',
-        //     'password'  => 'secret',
+        //     'username' => 'user',
+        //     'password' => 'secret',
         // ],
         // 'ssl' => [
         //     'ca' => '/etc/ssl/certs/ca.pem',
         // ],
     ],
 ];
-
 ```
 
----
+## Handler example
 
-## 📂 Handlers Joylashuvi
-
-### `common/kafka/handlers/OrderCreatedHandler.php`
+`common/kafka/handlers/OrderCreatedHandler.php`
 
 ```php
 <?php
 
 namespace common\kafka\handlers;
 
-use Muxtorov98\YiiKafka\KafkaHandlerInterface;
 use Muxtorov98\YiiKafka\Attribute\KafkaChannel;
+use Muxtorov98\YiiKafka\KafkaHandlerInterface;
 
 #[KafkaChannel(topic: 'order-create', group: 'order-service')]
-class OrderCreatedHandler implements KafkaHandlerInterface
+final class OrderCreatedHandler implements KafkaHandlerInterface
 {
     public function handle(array $message): void
     {
-        echo "Order created: " . json_encode($message) . PHP_EOL;
+        echo 'Order created: ' . json_encode($message, JSON_UNESCAPED_UNICODE) . PHP_EOL;
     }
 }
 ```
 
----
+Important:
 
-### `common/kafka/handlers/OrderHistoryHandler.php`
+- worker only runs handlers matching both `topic` and `group`
+- if you want separate consumer groups, define separate handlers with different groups
 
-```php
-<?php
-
-namespace common\kafka\handlers;
-
-use Muxtorov98\YiiKafka\KafkaHandlerInterface;
-use Muxtorov98\YiiKafka\Attribute\KafkaChannel;
-
-#[KafkaChannel(topic: 'order-create', group: 'order-history')]
-class OrderHistoryHandler implements KafkaHandlerInterface
-{
-    public function handle(array $message): void
-    {
-        echo "📦 History saved: " . json_encode($message) . PHP_EOL;
-    }
-}
-```
-
----
-
-### `common/kafka/handlers/OrderAnalyticsHandler.php`
-
-```php
-<?php
-
-namespace common\kafka\handlers;
-
-use Muxtorov98\YiiKafka\KafkaHandlerInterface;
-use Muxtorov98\YiiKafka\Attribute\KafkaChannel;
-
-#[KafkaChannel(topic: 'order-create', group: 'analytics-group')]
-class OrderAnalyticsHandler implements KafkaHandlerInterface
-{
-    public function handle(array $message): void
-    {
-        echo "📊 Analytics updated: " . json_encode($message) . PHP_EOL;
-    }
-}
-```
-
----
-
-## 🚀 Worker Ishga Tushirish
+## Start worker
 
 ```bash
 php yii worker/start
 ```
 
-**Avtomatik aniqlash va forking:**
+Example output:
 
-```
+```text
 🚀 Kafka Worker starting...
 👷 Worker started | topic=order-create, group=order-service, PID=721
-👷 Worker started | topic=order-create, group=order-history, PID=722
-👷 Worker started | topic=order-create, group=analytics-group, PID=723
+👂 Kafka listening: topic(s)=order-create, group=order-service
 ```
 
----
+## Publish messages
 
-## 📨 Xabar Yuborish (Publish)
+Controller example:
 
 ```php
 <?php
-declare(strict_types=1);
 
 namespace console\controllers;
 
+use Muxtorov98\YiiKafka\KafkaPublisher;
 use yii\console\Controller;
-use Muxtorov98\YiiKafka\Services\KafkaPublisher;
 
-final class PublishController extends Controller
+final class KafkaPublishController extends Controller
 {
-    public function __construct(
-        $id,
-        $module,
-        private KafkaPublisher $publisher,
-        $config = []
-    ) {
+    public function __construct($id, $module, private KafkaPublisher $publisher, $config = [])
+    {
         parent::__construct($id, $module, $config);
     }
-
-    public $defaultAction = 'send';
 
     public function actionSend(string $topic, string $json): int
     {
@@ -231,51 +142,40 @@ final class PublishController extends Controller
         return $this->publisher->publishBatch($topic, $jsonList);
     }
 }
-
 ```
-📤 Single
-```bash
 
+CLI:
+
+```bash
 php yii kafka-publish/send order-create '{"order_id":999}'
-```
-
-📦 Batch:
-```bash
 php yii kafka-publish/batch order-create '[{"id":1},{"id":2}]'
-
 ```
 
-**Natija:**
+## Failure behavior
 
-```
-✅ Message sent to topic "order-create"
-```
+- invalid JSON payload in producer throws controlled failure
+- producer checks flush result and throws if delivery is not confirmed in configured attempts
+- handler failures are retried using `retry.max_attempts`
+- after all retries fail:
+  - by default message is not committed
+  - if `consumer.commit_on_failure = true`, message is committed after failure
 
----
+## Production notes
 
-## 🧩 Natijaviy Ishlash
+- keep one logical handler per `topic + group` unless you intentionally want multiple handlers in the same consumer group process
+- use `commit_on_failure = false` if you prefer redelivery over loss
+- use `commit_on_failure = true` only if poison messages would block the queue and you accept skipping failed messages
+- use unique groups for independent business flows
 
-Yuborilgan bitta xabar **uchta** handler tomonidan qayta ishlanadi:
+## Current scope
 
-```
-Order created: {"order_id":999}
-📦 History saved: {"order_id":999}
-📊 Analytics updated: {"order_id":999}
-```
+This package provides a Yii2-focused Kafka worker and producer.
 
----
+It does not yet provide:
 
-## 🧠 Features
+- DLQ publishing
+- metrics integration
+- structured PSR logger integration
+- supervisor/systemd templates
 
-✅ Auto Worker Discovery  
-✅ Multi Group Consumer  
-✅ Graceful Shutdown  
-✅ Retry & Backoff Strategy  
-✅ LZ4 Compression Support  
-✅ Symfony-style Attribute Mapping
-
----
-
-## 📜 License
-
-MIT License © [Muxtorov98](https://github.com/muxtorov98)
+If you need framework-agnostic multi-bridge architecture, use the separate universal package instead.

@@ -13,7 +13,7 @@ use yii\base\BootstrapInterface;
  */
 final class Bootstrap implements BootstrapInterface
 {
-    public function bootstrap($app)
+    public function bootstrap($app): void
     {
         if ($app instanceof \yii\console\Application) {
             $app->controllerMap['worker'] = [
